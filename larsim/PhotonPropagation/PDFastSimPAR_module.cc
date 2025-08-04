@@ -31,8 +31,6 @@
 // LArSoft libraries
 #include "larcore/CoreUtils/ServiceUtil.h"
 #include "larcore/Geometry/Geometry.h"
-#include "larcorealg/CoreUtils/counter.h"
-#include "larcorealg/CoreUtils/enumerate.h"
 #include "larcorealg/Geometry/BoxBoundedGeo.h"
 #include "larcorealg/Geometry/OpDetGeo.h"
 #include "larcoreobj/SimpleTypesAndConstants/geo_vectors.h"
@@ -66,6 +64,8 @@
 
 // Random numbers
 #include "CLHEP/Random/RandPoissonQ.h"
+
+#include "range/v3/view/enumerate.hpp"
 
 #include <cmath>
 #include <ctime>
@@ -125,6 +125,7 @@ namespace phot {
       DP VUVHits{Name("VUVHits"), Comment("Configuration for UV visibility parameterization")};
       ODP VISHits{Name("VISHits"),
                   Comment("Configuration for visibile visibility parameterization")};
+      fhicl::Atom<bool> Verbose{Name("Verbose"), Comment("Print verbose information"), false};
     };
     using Parameters = art::EDProducer::Table<Config>;
 
@@ -139,6 +140,16 @@ namespace phot {
     void AddOpDetBTR(std::vector<sim::OpDetBacktrackerRecord>& opbtr,
                      std::vector<int>& ChannelMap,
                      const sim::OpDetBacktrackerRecord& btr) const;
+    void SimpleAddOpDetBTR(
+      // std::vector<sim::OpDetBacktrackerRecord>& opbtr,
+      std::map<int, sim::OBTRHelper>& opbtr,
+      std::vector<int>& ChannelMap,
+      size_t channel,
+      int trackID,
+      int time,
+      double pos[3],
+      double edeposit,
+      int num_photons = 1);
 
     bool isOpDetInSameTPC(geo::Point_t const& ScintPoint, geo::Point_t const& OpDetPoint) const;
     std::vector<geo::Point_t> opDetCenters() const;
@@ -161,6 +172,7 @@ namespace phot {
     const size_t fNOpChannels;
     const std::vector<geo::BoxBoundedGeo> fActiveVolumes;
     const int fNTPC;
+    double fDriftDistance;
     const std::vector<geo::Point_t> fOpDetCenter;
 
     // Module behavior
@@ -275,7 +287,7 @@ namespace phot {
     {
       auto log = mf::LogTrace("PDFastSimPAR") << "PDFastSimPAR: active volume boundaries from "
                                               << fActiveVolumes.size() << " volumes:";
-      for (auto const& [iCryo, box] : util::enumerate(fActiveVolumes)) {
+      for (auto const& [iCryo, box] : ::ranges::views::enumerate(fActiveVolumes)) {
         log << "\n - C:" << iCryo << ": " << box.Min() << " -- " << box.Max() << " cm";
       }
     }
@@ -298,6 +310,13 @@ namespace phot {
         produces<std::vector<sim::SimPhotons>>("Reflected");
       }
     }
+
+    // determine drift distance
+    fDriftDistance = fGeom.TPC().DriftDistance();
+    // for multiple TPCs, use second TPC to skip small volume at edges of detector (DUNE)
+    if (fNTPC > 1 && fDriftDistance < 50)
+      fDriftDistance = fGeom.TPC(geo::TPCID{0, 1}).DriftDistance();
+
     mf::LogInfo("PDFastSimPAR") << "PDFastSimPAR Initialization finish.\n"
                                 << "Simulate using semi-analytic model for number of hits."
                                 << std::endl;
@@ -317,6 +336,10 @@ namespace phot {
     auto opbtr = std::make_unique<std::vector<sim::OpDetBacktrackerRecord>>();
     auto phlit_ref = std::make_unique<std::vector<sim::SimPhotonsLite>>();
     auto opbtr_ref = std::make_unique<std::vector<sim::OpDetBacktrackerRecord>>();
+
+    //Helpers holding maps
+    std::map<int, sim::OBTRHelper> opbtr_helper, opbtr_helper_ref;
+
     auto& dir_phlitcol(*phlit);
     auto& ref_phlitcol(*phlit_ref);
     // SimPhotons
@@ -355,7 +378,18 @@ namespace phot {
     int num_fastdp = 0;
     int num_slowdp = 0;
 
+    mf::LogTrace("PDFastSimPAR") << "Creating SimPhotonsLite/SimPhotons from " << (*edeps).size()
+                                 << " energy deposits\n";
+
     for (auto const& edepi : *edeps) {
+
+      if (!(num_points % 1000)) {
+        mf::LogTrace("PDFastSimPAR")
+          << "SimEnergyDeposit: " << num_points << " " << edepi.TrackID() << " " << edepi.Energy()
+          << "\nStart: " << edepi.Start() << "\nEnd: " << edepi.End()
+          << "\nNF: " << edepi.NumFPhotons() << "\nNS: " << edepi.NumSPhotons()
+          << "\nSYR: " << edepi.ScintYieldRatio() << "\n";
+      }
       num_points++;
 
       int nphot_fast = edepi.NumFPhotons();
@@ -437,7 +471,6 @@ namespace phot {
 
           // SimPhotonsLite case
           if (fUseLitePhotons) {
-            sim::OpDetBacktrackerRecord tmpbtr(channel);
             if (ndetected_fast > 0 && fDoFastComponent) {
               int n = ndetected_fast;
               num_fastdp += n;
@@ -445,32 +478,72 @@ namespace phot {
                 // calculates the time at which the photon was produced
                 double dtime = edepi.StartT() + fScintTime->fastScintTime();
                 if (fIncludePropTime) dtime += transport_time[i];
+
                 int time = static_cast<int>(std::round(dtime));
-                if (Reflected)
+                if (Reflected) {
                   ++ref_phlitcol[channel].DetectedPhotons[time];
-                else
+                  SimpleAddOpDetBTR(
+                    // *opbtr_ref, PDChannelToSOCMapReflect, channel, trackID, time, pos, edeposit, 1);
+                    opbtr_helper_ref,
+                    PDChannelToSOCMapReflect,
+                    channel,
+                    trackID,
+                    time,
+                    pos,
+                    edeposit,
+                    1);
+                }
+                else {
                   ++dir_phlitcol[channel].DetectedPhotons[time];
-                tmpbtr.AddScintillationPhotons(trackID, time, 1, pos, edeposit);
+                  SimpleAddOpDetBTR(
+                    // *opbtr, PDChannelToSOCMapDirect, channel, trackID, time, pos, edeposit, 1);
+                    opbtr_helper,
+                    PDChannelToSOCMapDirect,
+                    channel,
+                    trackID,
+                    time,
+                    pos,
+                    edeposit,
+                    1);
+                }
               }
             }
             if (ndetected_slow > 0 && fDoSlowComponent) {
               int n = ndetected_slow;
               num_slowdp += n;
               for (int i = 0; i < n; ++i) {
+                // calculates the time at which the photon was produced
                 double dtime = edepi.StartT() + fScintTime->slowScintTime();
                 if (fIncludePropTime) dtime += transport_time[ndetected_fast + i];
                 int time = static_cast<int>(std::round(dtime));
-                if (Reflected)
+                if (Reflected) {
                   ++ref_phlitcol[channel].DetectedPhotons[time];
-                else
+                  SimpleAddOpDetBTR(
+                    // *opbtr_ref, PDChannelToSOCMapReflect, channel, trackID, time, pos, edeposit, 1);
+                    opbtr_helper_ref,
+                    PDChannelToSOCMapReflect,
+                    channel,
+                    trackID,
+                    time,
+                    pos,
+                    edeposit,
+                    1);
+                }
+                else {
                   ++dir_phlitcol[channel].DetectedPhotons[time];
-                tmpbtr.AddScintillationPhotons(trackID, time, 1, pos, edeposit);
+                  SimpleAddOpDetBTR(
+                    // *opbtr, PDChannelToSOCMapDirect, channel, trackID, time, pos, edeposit, 1);
+                    opbtr_helper,
+                    PDChannelToSOCMapDirect,
+                    channel,
+                    trackID,
+                    time,
+                    pos,
+                    edeposit,
+                    1);
+                }
               }
             }
-            if (Reflected)
-              AddOpDetBTR(*opbtr_ref, PDChannelToSOCMapReflect, tmpbtr);
-            else
-              AddOpDetBTR(*opbtr, PDChannelToSOCMapDirect, tmpbtr);
           }
           // SimPhotons case
           else {
@@ -523,10 +596,29 @@ namespace phot {
                                  << "\ndetected fast photons: " << num_fastdp
                                  << ", detected slow photons: " << num_slowdp;
 
+    mf::LogDebug("PDFastSimPAR") << "Number of entries in opbtrs";
+    for (auto& iopbtr : *opbtr) {
+      mf::LogDebug("PDFastSimPAR")
+        << "OpDet: " << iopbtr.OpDetNum() << " " << iopbtr.timePDclockSDPsMap().size();
+    }
+    mf::LogDebug("PDFastSimPAR") << "Number of entries in opbtrs refelected";
+    for (auto& iopbtr : *opbtr_ref) {
+      mf::LogDebug("PDFastSimPAR")
+        << "OpDet: " << iopbtr.OpDetNum() << " " << iopbtr.timePDclockSDPsMap().size();
+    }
+
     if (fUseLitePhotons) {
+
+      for (auto& iopbtr : opbtr_helper) {
+        opbtr->emplace_back(iopbtr.second);
+      }
+
       event.put(move(phlit));
       event.put(move(opbtr));
       if (fDoReflectedLight) {
+        for (auto& iopbtr : opbtr_helper_ref) {
+          opbtr_ref->emplace_back(iopbtr.second);
+        }
         event.put(move(phlit_ref), "Reflected");
         event.put(move(opbtr_ref), "Reflected");
       }
@@ -562,6 +654,26 @@ namespace phot {
     }
   }
 
+  void PDFastSimPAR::SimpleAddOpDetBTR( //std::vector<sim::OpDetBacktrackerRecord>& opbtr,
+    std::map<int, sim::OBTRHelper>& opbtr,
+    std::vector<int>& ChannelMap,
+    size_t channel,
+    int trackID,
+    int time,
+    double pos[3],
+    double edeposit,
+    int num_photons)
+  {
+    if (ChannelMap[channel] < 0) {
+      ChannelMap[channel] = opbtr.size();
+      // opbtr.push_back(sim::OpDetBacktrackerRecord(channel));
+      opbtr.emplace(channel, channel);
+    }
+    // size_t idtest = ChannelMap[channel];
+    // opbtr.at(idtest).AddScintillationPhotonsToMap(trackID, time, num_photons, pos, edeposit);
+    opbtr.at(channel).AddScintillationPhotonsToMap(trackID, time, num_photons, pos, edeposit);
+  }
+
   //......................................................................
   // calculates number of photons detected given visibility and emitted number of photons
   void PDFastSimPAR::detectedNumPhotons(std::vector<int>& DetectedNumPhotons,
@@ -579,19 +691,30 @@ namespace phot {
                                       geo::Point_t const& OpDetPoint) const
   {
     // check optical channel is in same TPC as scintillation light, if not doesn't see light
-    // temporary method working for SBND, uBooNE, DUNE 1x2x6; to be replaced to work in full DUNE geometry
+    // temporary method, needs to be replaced with geometry service
+    // working for SBND, uBooNE, DUNE HD 1x2x6, DUNE HD 10kt and DUNE VD subset
+
+    // special case for SBND = 2 TPCs
     // check x coordinate has same sign or is close to zero
-    if (((ScintPoint.X() < 0.) != (OpDetPoint.X() < 0.)) && std::abs(OpDetPoint.X()) > 10. &&
-        fNTPC == 2) { // TODO: replace with geometry service method
+    if (fNTPC == 2 && ((ScintPoint.X() < 0.) != (OpDetPoint.X() < 0.)) &&
+        std::abs(OpDetPoint.X()) > 10.) {
       return false;
     }
+
+    // special case for DUNE-HD 10kt = 300 TPCs
+    // check whether distance in drift direction > 1 drift distance
+    if (fNTPC == 300 && std::abs(ScintPoint.X() - OpDetPoint.X()) > fDriftDistance) {
+      return false;
+    }
+    // not needed for DUNE HD 1x2x6, DUNE VD subset, uBooNE
+
     return true;
   }
 
   std::vector<geo::Point_t> PDFastSimPAR::opDetCenters() const
   {
     std::vector<geo::Point_t> opDetCenter;
-    for (size_t const i : util::counter(fNOpChannels)) {
+    for (size_t const i : ::ranges::views::ints(size_t(0), fNOpChannels)) {
       geo::OpDetGeo const& opDet = fGeom.OpDetGeoFromOpDet(i);
       opDetCenter.push_back(opDet.GetCenter());
     }

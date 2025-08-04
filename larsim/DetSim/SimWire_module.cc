@@ -54,7 +54,7 @@
 #include "CLHEP/Random/RandFlat.h"
 
 // LArSoft includes
-#include "larcore/Geometry/Geometry.h"
+#include "larcore/Geometry/WireReadout.h"
 #include "larcorealg/Geometry/PlaneGeo.h"
 #include "lardata/DetectorInfoServices/DetectorClocksService.h"
 #include "lardata/DetectorInfoServices/DetectorPropertiesService.h"
@@ -183,20 +183,14 @@ namespace detsim {
     // ... Poisson dist function for fluctuating magnitude of noise frequency component
     if (fNoiseFluctChoice == "SimplePoisson") {
       // .. simple modified Poisson with (x-1)! in denominator
-      double params[1];
       fNoiseFluct = new TF1("_poisson", "[0]**(x) * exp(-[0]) / ROOT::Math::tgamma(x)", 0, 5.);
-      params[0] = fNoiseFluctPar[0]; // Poisson mean
-      fNoiseFluct->SetParameters(params);
+      fNoiseFluct->SetParameters(fNoiseFluctPar[0]); // Poisson mean
     }
     else if (fNoiseFluctChoice == "WeightedPoisson") {
       // .. weighted Poisson in ArgoNeuT DDN model
-      double params[3];
       fNoiseFluct = new TF1(
         "_poisson", "[0]*pow([1]/[2], x/[2])*exp(-[1]/[2])/ROOT::Math::tgamma(x/[2]+1.)", 0, 5.);
-      params[0] = fNoiseFluctPar[0];
-      params[1] = fNoiseFluctPar[1];
-      params[2] = fNoiseFluctPar[2];
-      fNoiseFluct->SetParameters(params);
+      fNoiseFluct->SetParameters(fNoiseFluctPar[0], fNoiseFluctPar[1], fNoiseFluctPar[2]);
     }
     else {
       throw cet::exception("SimWire::beginJob")
@@ -230,14 +224,14 @@ namespace detsim {
   //-------------------------------------------------
   void SimWire::produce(art::Event& evt)
   {
-
-    art::ServiceHandle<geo::Geometry const> geo;
+    auto const& wireReadoutGeom = art::ServiceHandle<geo::WireReadout const>()->Get();
+    auto const nchannels = wireReadoutGeom.Nchannels();
 
     // ... generate unique noise for each channel in each event
     if (fNoiseNchToSim < 0) {
       fNoise.clear();
-      fNoise.resize(geo->Nchannels());
-      for (unsigned int p = 0; p < geo->Nchannels(); ++p) {
+      fNoise.resize(nchannels);
+      for (unsigned int p = 0; p < nchannels; ++p) {
         GenNoise(fNoise[p], fEngine);
       }
     }
@@ -249,7 +243,7 @@ namespace detsim {
     std::vector<const sim::SimChannel*> chanHandle;
     evt.getView(fDriftEModuleLabel, chanHandle);
 
-    std::vector<const sim::SimChannel*> channels(geo->Nchannels());
+    std::vector<const sim::SimChannel*> channels(nchannels);
     for (size_t c = 0; c < chanHandle.size(); ++c) {
       channels[chanHandle[c]->Channel()] = chanHandle[c];
     }
@@ -264,7 +258,7 @@ namespace detsim {
     CLHEP::RandFlat flat(fEngine);
 
     std::map<int, double>::iterator mapIter;
-    for (unsigned int chan = 0; chan < geo->Nchannels(); chan++) {
+    for (unsigned int chan = 0; chan < nchannels; chan++) {
 
       std::vector<short> adcvec(fNTicks, 0);
       std::vector<double> fChargeWork(fNTicks, 0.);
@@ -281,7 +275,7 @@ namespace detsim {
         int time_offset = 0;
 
         // .. Convolve charge with appropriate response function
-        if (geo->SignalType(chan) == geo::kInduction) {
+        if (wireReadoutGeom.SignalType(chan) == geo::kInduction) {
           fFFT->Convolute(fChargeWork, fIndShape);
           time_offset = fFieldRespTOffset[1] + fCalibRespTOffset[1];
         }

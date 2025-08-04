@@ -17,12 +17,13 @@ namespace sim {
 
   //--------------------------------------------------------------------------------------------
   MCRecoPart::MCRecoPart(fhicl::ParameterSet const& pset)
-    : _x_max{std::numeric_limits<double>::min()}
+    : _x_max{std::numeric_limits<double>::lowest()}
     , _x_min{std::numeric_limits<double>::max()}
-    , _y_max{std::numeric_limits<double>::min()}
+    , _y_max{std::numeric_limits<double>::lowest()}
     , _y_min{std::numeric_limits<double>::max()}
-    , _z_max{std::numeric_limits<double>::min()}
+    , _z_max{std::numeric_limits<double>::lowest()}
     , _z_min{std::numeric_limits<double>::max()}
+    , _trackIDOffsets{pset.get<std::vector<unsigned int>>("TrackIDOffsets", {0})}
   {
     this->clear();
     _track_index.clear();
@@ -53,7 +54,10 @@ namespace sim {
 
     unsigned int result = this->at(part_index)._mother;
 
-    if (!result) return this->at(part_index)._track_id;
+    //Is a primary particle. Account for possible track ID offsets
+    for (auto const& offset : _trackIDOffsets) {
+      if (result == offset) return this->at(part_index)._track_id;
+    }
 
     if (TrackToParticleIndex(result) != ::sim::kINVALID_UINT) return result;
 
@@ -80,7 +84,10 @@ namespace sim {
 
     if (result == this->at(part_index)._track_id) return result;
 
-    if (!result) return this->at(part_index)._track_id;
+    //Is a primary particle. Account for possible track ID offsets
+    for (auto const& offset : _trackIDOffsets) {
+      if (result == offset) return this->at(part_index)._track_id;
+    }
 
     auto mother_index = TrackToParticleIndex(result);
 
@@ -125,7 +132,7 @@ namespace sim {
   //--------------------------------------------------------------------------------------------
   void MCRecoPart::AddParticles(const std::vector<simb::MCParticle>& mcp_v,
                                 const std::vector<simb::Origin_t>& orig_v,
-                                const std::vector<sim::MCParticleLite>& mcmp_v)
+                                const std::vector<simb::MCParticle>& mcmp_v)
   //--------------------------------------------------------------------------------------------
   {
     if (orig_v.size() != mcp_v.size())
@@ -186,7 +193,7 @@ namespace sim {
     // Now loop over dropped particles
     for (auto const& mcmp : mcmp_v) {
 
-      _track_index.try_emplace(mcmp.TrackID(), this->size());
+      _track_index.try_emplace(mcmp.TrackId(), this->size());
 
       this->push_back(sim::MCMiniPart(mcmp));
 

@@ -8,7 +8,9 @@
 #include "fhiclcpp/ParameterSet.h"
 #include "messagefacility/MessageLogger/MessageLogger.h"
 
+#include "larcore/CoreUtils/ServiceUtil.h" // lar::providerFrom()
 #include "larcore/Geometry/Geometry.h"
+#include "larcore/Geometry/WireReadout.h"
 #include "larcorealg/Geometry/GeometryCore.h"
 #include "larcorealg/Geometry/TPCGeo.h"
 #include "larcoreobj/SimpleTypesAndConstants/RawTypes.h"
@@ -17,22 +19,21 @@
 
 #include <iostream>
 #include <map>
+#include <numeric> // std::iota()
 #include <utility>
 #include <vector>
 
 namespace sim {
 
   namespace details {
-    std::map<geo::PlaneID, size_t> createPlaneIndexMap()
+    geo::PlaneDataContainer<std::size_t> createPlaneIndexMap()
     {
-      art::ServiceHandle<geo::Geometry const> geom;
-      std::map<geo::PlaneID, size_t> m;
-      size_t i = 0;
-      for (auto const& pid : geom->Iterate<geo::PlaneID>()) {
-        m[pid] = i;
-        i++;
-      }
-      return m;
+      geo::WireReadoutGeom const& wireReadout = art::ServiceHandle<geo::WireReadout const>()->Get();
+      geo::GeometryCore const& geom = *lar::providerFrom<geo::Geometry>();
+      geo::PlaneDataContainer<std::size_t> planeIndices{
+        geom.Ncryostats(), geom.MaxTPCs(), wireReadout.MaxPlanes()};
+      std::iota(planeIndices.begin(), planeIndices.end(), 0);
+      return planeIndices;
     }
   }
 
@@ -64,7 +65,7 @@ namespace sim {
     _mc_edeps.clear();
     _track_index.clear();
 
-    art::ServiceHandle<geo::Geometry const> geom;
+    auto const& wireReadoutGeom = art::ServiceHandle<geo::WireReadout const>()->Get();
 
     // Key map to identify a unique particle energy deposition point
     std::map<std::pair<UniquePosition, unsigned int>, int> hit_index_m;
@@ -95,25 +96,23 @@ namespace sim {
           auto key = std::make_pair(pos, real_track_id);
           auto hit_index_track_iter = hit_index_m.find(key);
           if (hit_index_track_iter == hit_index_m.end()) {
-            int new_hit_index = this->__GetEdepArray__(real_track_id).size();
+            int new_hit_index = __GetEdepArray__(real_track_id).size();
             hit_index_m[key] = new_hit_index;
           }
           else {
             hit_index = (*hit_index_track_iter).second;
           }
-          auto const pid = geom->ChannelToWire(ch)[0].planeID();
+          auto const pid = wireReadoutGeom.ChannelToWire(ch)[0].planeID();
           auto const channel_id = pindex[pid];
           double charge = ide.numElectrons;
           if (hit_index < 0) {
             // This particle energy deposition is never recorded so far. Create a new Edep
-            //float charge = ide.numElectrons * detp->ElectronsToADC();
-            this->__GetEdepArray__(real_track_id)
+            __GetEdepArray__(real_track_id)
               .emplace_back(pos, pid, pindex.size(), ide.energy, charge, channel_id);
           }
           else {
             // Append charge to the relevant edep (@ hit_index)
-            //float charge = ide.numElectrons * detp->ElectronsToADC();
-            MCEdep& edep = this->__GetEdepArray__(real_track_id).at(hit_index);
+            MCEdep& edep = __GetEdepArray__(real_track_id).at(hit_index);
             edep.deps[channel_id].charge += charge;
             edep.deps[channel_id].energy += ide.energy;
           }
@@ -132,115 +131,82 @@ namespace sim {
     _mc_edeps.clear();
     _track_index.clear();
 
+    auto const& wireReadoutGeom = art::ServiceHandle<geo::WireReadout const>()->Get();
     art::ServiceHandle<geo::Geometry const> geom;
 
     // Key map to identify a unique particle energy deposition point
-    std::map<std::pair<UniquePosition, unsigned int>, int> hit_index_m;
+    using TrackPoint_t = std::pair<UniquePosition, unsigned int>;
+    using HitIndices_t = std::map<TrackPoint_t, int>;
+    HitIndices_t hit_index_m;
 
-    auto pindex = details::createPlaneIndexMap();
+    geo::PlaneDataContainer<std::size_t> const pindex = details::createPlaneIndexMap();
 
     if (_debug_mode)
       std::cout << "Processing " << sedArray.size() << " energy deposits..." << std::endl;
-    // Loop over channels
-    for (size_t i = 0; i < sedArray.size(); ++i) {
 
-      // Get data to loop over
-      auto const& sed = sedArray[i];
+    geo::TPCGeo const* TPC = nullptr; // the TPC where the last deposit was seen
 
-      // David Caratelli:
-      // much of the code below is taken from the module:
+    // Loop over energy depositions
+    for (sim::SimEnergyDeposit const& sed : sedArray) {
+
+      // David Caratelli: much of the code below is taken from the module:
       // https://cdcvs.fnal.gov/redmine/projects/larsim/repository/revisions/develop/entry/larsim/ElectronDrift/SimDriftElectrons_module.cc
 
-      // given this SimEnergyDeposit, find the TPC channel information
-      // "xyz" is the position of the energy deposit in world
-      // coordinates. Note that the units of distance in
-      // sim::SimEnergyDeposit are supposed to be cm.
       auto const mp = sed.MidPoint();
-      // From the position in world coordinates, determine the
-      // cryostat and tpc. If somehow the step is outside a tpc
-      // (e.g., cosmic rays in rock) just move on to the next one.
-      unsigned int cryostat = 0;
-      try {
-        geom->PositionToCryostatID(mp);
-      }
-      catch (cet::exception& e) {
-        mf::LogWarning("SimDriftElectrons") << "step " // << energyDeposit << "\n"
-                                            << "cannot be found in a cryostat\n"
-                                            << e;
-        continue;
-      }
-      unsigned int tpc = 0;
-      try {
-        geom->PositionToTPCID(mp);
-      }
-      catch (cet::exception& e) {
-        mf::LogWarning("SimDriftElectrons") << "step " // << energyDeposit << "\n"
-                                            << "cannot be found in a TPC\n"
-                                            << e;
-        continue;
-      }
-      geo::TPCID const tpcid{cryostat, tpc};
-
-      //Define charge drift direction: driftcoordinate (x, y or z) and driftsign (positive or negative). Also define coordinates perpendicular to drift direction.
-      // unused int driftcoordinate = std::abs(tpcGeo.DetectDriftDirection())-1;  //x:0, y:1, z:2
+      // From the position in world coordinates, determine the cryostat and tpc. If
+      // somehow the step is outside a tpc (e.g., cosmic rays in rock) just move on to the
+      // next one.
+      // Try first with the TPC from the previous point, if any; if it fails, go hunting
+      if (!TPC || !TPC->ContainsPosition(mp)) TPC = geom->PositionToTPCptr(mp);
+      if (!TPC) continue;
 
       // make a collection of electrons for each plane
-      for (auto const& planeid : geom->Iterate<geo::PlaneID>()) {
+      for (geo::PlaneGeo const& plane : wireReadoutGeom.Iterate<geo::PlaneGeo>(TPC->ID())) {
 
-        // grab the nearest channel to the fDriftClusterPos position
-        // David Caratelli, comment begin:
-        // NOTE: the below code works only when the drift coordinate is indeed in x (i.e. 0th coordinate)
-        // see code linked above for a much more careful treatment of the coordinate system
-        // David Caratelli, comment end.
-        raw::ChannelID_t ch;
-        try {
-          ch = geom->NearestChannel(mp, planeid);
-        }
-        catch (cet::exception& e) {
-          mf::LogWarning("SimDriftElectrons") << "step " // << energyDeposit << "\n"
-                                              << "nearest wire not in TPC\n"
-                                              << e;
+        // require containment on the plane;
+        // it may fail also if the TPC volume is bigger than the active one
+        if (!plane.isProjectionOnPlane(mp)) {
+          geo::PlaneGeo::WidthDepthProjection_t const deltaProj =
+            plane.DeltaFromPlane(plane.PointWidthDepthProjection(mp));
+          mf::LogVerbatim{"SimDriftElectrons"} << "Point " << mp << " is off " << plane.ID()
+                                               << " by " << deltaProj.R() << " cm " << deltaProj;
           continue;
         }
+        geo::PlaneID const planeid = plane.ID();
 
-        int track_id = sed.TrackID();
+        // for each track ID, we keep a list of "hits" (depositions at the exact same location);
+        // each hit tracks the energy and charge per plane (via a plane index);
+        // note which wire/channel senses the charge does not make any difference
+        // and all the planes in the TPC get the same charge contributions (barred geometric acceptance).
+        // So: __GetEdepArray__[trackID][hitIndex].deps[planeIndex].energy/charge
+        int const track_id = std::abs(sed.TrackID());
+        std::vector<sim::MCEdep>& trackEDeps = __GetEdepArray__(track_id);
+        TrackPoint_t const key{mp, track_id};
 
-        if (track_id < 0) track_id = track_id * (-1);
-        unsigned int real_track_id = track_id;
-
-        UniquePosition pos(mp.X(), mp.Y(), mp.Z());
-
+        // find the index of the hit the energy belongs to (possibly a new one):
         int hit_index = -1;
-        auto key = std::make_pair(pos, real_track_id);
-        auto hit_index_track_iter = hit_index_m.find(key);
-        if (hit_index_track_iter == hit_index_m.end()) {
-          int new_hit_index = this->__GetEdepArray__(real_track_id).size();
-          hit_index_m[key] = new_hit_index;
-        }
+        auto const hit_index_track_iter = hit_index_m.find(key);
+        if (hit_index_track_iter == hit_index_m.end()) { hit_index_m[key] = trackEDeps.size(); }
         else {
-          hit_index = (*hit_index_track_iter).second;
+          hit_index = hit_index_track_iter->second;
         }
-        auto const pid = geom->ChannelToWire(ch)[0].planeID();
-        auto const channel_id = pindex[pid];
-        double charge = sed.NumElectrons();
+        size_t const planeNumber = pindex[planeid];
+        double const charge = sed.NumElectrons();
         if (hit_index < 0) {
           // This particle energy deposition is never recorded so far. Create a new Edep
-          //float charge = ide.numElectrons * detp->ElectronsToADC();
-          this->__GetEdepArray__(real_track_id)
-            .emplace_back(pos, pid, pindex.size(), sed.Energy(), charge, channel_id);
+          trackEDeps.emplace_back(mp, planeid, pindex.size(), sed.Energy(), charge, planeNumber);
         }
         else {
           // Append charge to the relevant edep (@ hit_index)
-          //float charge = ide.numElectrons * detp->ElectronsToADC();
-          MCEdep& edep = this->__GetEdepArray__(real_track_id).at(hit_index);
-          edep.deps[channel_id].charge += charge;
-          edep.deps[channel_id].energy += sed.Energy();
+          MCEdep::deposit& dep = trackEDeps.at(hit_index).deps[planeNumber];
+          dep.charge += charge;
+          dep.energy += sed.Energy();
         }
-      } // end looping over planes
+      } // end looping over planes in TPC
     }   // end looping over SimEnergyDeposits
 
     if (_debug_mode) {
-      std::cout << Form("  Collected %zu particles' energy depositions...", _mc_edeps.size())
+      std::cout << "  Collected " << _mc_edeps.size() << " particles' energy depositions..."
                 << std::endl;
     }
   }
@@ -248,9 +214,9 @@ namespace sim {
   void MCRecoEdep::MakeMCEdep(const std::vector<sim::SimEnergyDepositLite>& sedArray)
   {
     // Create a substitute array of sim::SimEnergyDeposit to avoid duplicating code...
-    // Note that this makes use of the explicit conversion operator
-    // defined in SimEnergyDepositLite class. Information will be partial.
-    // Most notably for MakeMCEdep, charge (numElectrons) will be 0.
+    // Note that this makes use of the explicit conversion operator defined in
+    // SimEnergyDepositLite class. Information will be partial.  Most notably for
+    // MakeMCEdep, charge (numElectrons) will be 0.
     std::vector<sim::SimEnergyDeposit> new_sedArray(sedArray.begin(), sedArray.end());
     MakeMCEdep(new_sedArray);
   }

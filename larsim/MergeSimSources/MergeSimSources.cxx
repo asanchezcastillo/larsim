@@ -62,7 +62,8 @@ void sim::MergeSimSourcesUtility::MergeMCParticles(
 
 void sim::MergeSimSourcesUtility::MergeSimChannels(std::vector<sim::SimChannel>& merged_vector,
                                                    const std::vector<sim::SimChannel>& input_vector,
-                                                   size_t source_index)
+                                                   size_t source_index,
+                                                   bool skip_trackIDs)
 {
   if (source_index >= fG4TrackIDOffsets.size())
     std::runtime_error("ERROR in MergeSimSourcesUtility: Source index out of range!");
@@ -89,7 +90,7 @@ void sim::MergeSimSourcesUtility::MergeSimChannels(std::vector<sim::SimChannel>&
       range_trackID.second = std::abs(thisrange.second);
   }
 
-  UpdateG4TrackIDRange(range_trackID, source_index);
+  if (!skip_trackIDs) UpdateG4TrackIDRange(range_trackID, source_index);
 }
 
 void sim::MergeSimSourcesUtility::MergeAuxDetSimChannels(
@@ -250,6 +251,8 @@ sim::SimEnergyDeposit sim::MergeSimSourcesUtility::offsetSimEnergyDepositTrackID
 {
 
   auto tid = (edep.TrackID() >= 0) ? (edep.TrackID() + offset) : (edep.TrackID() - offset);
+  auto orig_tid =
+    (edep.OrigTrackID() >= 0) ? (edep.OrigTrackID() + offset) : (edep.OrigTrackID() - offset);
 
   return sim::SimEnergyDeposit{
     edep.NumPhotons(),      // np
@@ -261,7 +264,8 @@ sim::SimEnergyDeposit sim::MergeSimSourcesUtility::offsetSimEnergyDepositTrackID
     edep.T0(),              // t0
     edep.T1(),              // t1
     tid,                    // id
-    edep.PdgCode()          // pdg
+    edep.PdgCode(),         // pdg
+    orig_tid                // orig id
   };
 } // sim::MergeSimSourcesUtility::offsetTrackID()
 

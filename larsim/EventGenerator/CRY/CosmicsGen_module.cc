@@ -96,7 +96,7 @@ namespace evgen {
     , fEngine(art::ServiceHandle<rndm::NuRandomService>()->registerAndSeedEngine(createEngine(0),
                                                                                  pset,
                                                                                  "Seed"))
-    , fCRYHelp{pset, fEngine, art::ServiceHandle<geo::Geometry const>{}->GetWorldVolumeName()}
+    , fCRYHelp{pset, fEngine, art::ServiceHandle<geo::Geometry const>{} -> GetWorldVolumeName()}
   {
     produces<std::vector<simb::MCTruth>>();
     produces<sumdata::RunData, art::InRun>();
@@ -173,11 +173,12 @@ namespace evgen {
 
     simb::MCTruth truth;
 
+    auto const [surface_y, tpc_length] = std::make_tuple(geom->SurfaceY(), geom->TPC().Length());
     while (nCrossCryostat < 1) {
 
       simb::MCTruth pretruth;
       truth.SetOrigin(simb::kCosmicRay);
-      fCRYHelp.Sample(pretruth, geom->SurfaceY(), geom->DetLength(), 0);
+      fCRYHelp.Sample(pretruth, surface_y, tpc_length, 0);
 
       int numPhotons = 0;
       int numElectrons = 0;

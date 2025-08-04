@@ -24,6 +24,8 @@
 #include "canvas/Persistency/Common/Assns.h"
 #include "canvas/Persistency/Common/FindOneP.h"
 
+#include "range/v3/view/zip.hpp"
+
 #include <memory>
 #include <optional>
 #include <string>
@@ -33,7 +35,6 @@
 #include "MergeSimSources.h"
 #include "larcorealg/CoreUtils/counter.h"
 #include "larcorealg/CoreUtils/enumerate.h"
-#include "larcorealg/CoreUtils/zip.h"
 #include "lardataobj/Simulation/AuxDetHit.h"
 #include "lardataobj/Simulation/GeneratedParticleInfo.h"
 #include "lardataobj/Simulation/SimChannel.h"
@@ -81,6 +82,12 @@ public:
       fhicl::Name{"FillSimChannels"},
       fhicl::Comment{"whether to merge SimChannels"},
       true // default
+    };
+
+    fhicl::Atom<bool> SkipTrackIDOffsets{
+      fhicl::Name{"SkipTrackIDOffsets"},
+      fhicl::Comment{"skip the application of trackID offsets"},
+      false // default
     };
 
     fhicl::Atom<bool> FillAuxDetSimChannels{
@@ -134,6 +141,7 @@ private:
   bool const fFillMCParticles;
   bool const fFillSimPhotons;
   bool const fFillSimChannels;
+  bool const fSkipTrackIDOffsets;
   bool const fFillAuxDetSimChannels;
   bool const fFillSimEnergyDeposits;
   std::vector<std::string> const fEnergyDepositionInstances;
@@ -175,6 +183,7 @@ sim::MergeSimSources::MergeSimSources(Parameters const& params)
   , fFillMCParticles(params().FillMCParticles())
   , fFillSimPhotons(params().FillSimPhotons())
   , fFillSimChannels(params().FillSimChannels())
+  , fSkipTrackIDOffsets(params().SkipTrackIDOffsets())
   , fFillAuxDetSimChannels(params().FillAuxDetSimChannels())
   , fFillSimEnergyDeposits(
       getOptionalValue(params().FillSimEnergyDeposits)
@@ -185,7 +194,7 @@ sim::MergeSimSources::MergeSimSources(Parameters const& params)
   , fFillParticleAncestryMaps(params().FillParticleAncestryMaps())
 {
 
-  if (fInputSourcesLabels.size() != fTrackIDOffsets.size()) {
+  if (fSkipTrackIDOffsets == false && fInputSourcesLabels.size() != fTrackIDOffsets.size()) {
     throw art::Exception(art::errors::Configuration)
       << "Unequal input vector sizes: InputSourcesLabels and TrackIDOffsets.\n";
   }
@@ -294,7 +303,7 @@ void sim::MergeSimSources::produce(art::Event& e)
 
   MergeSimSourcesUtility MergeUtility{fTrackIDOffsets};
 
-  for (auto const& [i_source, input_label] : util::enumerate(fInputSourcesLabels)) {
+  for (auto const& [i_source, input_label] : fInputSourcesLabels | ranges::views::enumerate) {
 
     if (fFillMCParticles) {
       art::PtrMaker<simb::MCParticle> const makePartPtr{e};
@@ -313,7 +322,18 @@ void sim::MergeSimSources::produce(art::Event& e)
 
     if (fFillSimChannels) {
       auto const& input_scCol = e.getProduct<std::vector<sim::SimChannel>>(input_label);
-      MergeUtility.MergeSimChannels(*scCol, input_scCol, i_source);
+      MergeUtility.MergeSimChannels(*scCol, input_scCol, i_source, fSkipTrackIDOffsets);
+
+      /*
+      for (auto& simChannel : *scCol) {
+	auto& tdcIDEMap = simChannel.TDCIDEMap();
+	std::map<int, std::vector<sim::IDE>> sortedTDCIDEMap;
+	for (auto& entry : tdcIDEMap) {
+	  sortedTDCIDEMap[entry.first] = std::move(entry.second);
+	}
+	simChannel.SetTDCIDEMap(std::move(sortedTDCIDEMap));
+      }
+      */
     }
 
     if (fFillAuxDetSimChannels) {
@@ -348,7 +368,8 @@ void sim::MergeSimSources::produce(art::Event& e)
     }
 
     if (fFillSimEnergyDeposits) {
-      for (auto const& [edep_inst, edepCol] : util::zip(fEnergyDepositionInstances, edepCols)) {
+      for (auto const& [edep_inst, edepCol] :
+           ranges::views::zip(fEnergyDepositionInstances, edepCols)) {
         art::InputTag const edep_tag{input_label.label(), edep_inst};
         MergeUtility.MergeSimEnergyDeposits(edepCol, e.getProduct<edeps_t>(edep_tag), i_source);
       } // for edep
@@ -356,7 +377,7 @@ void sim::MergeSimSources::produce(art::Event& e)
 
     if (fFillAuxDetHits) {
       for (auto const& [auxdethit_inst, auxdethitCol] :
-           util::zip(fAuxDetHitsInstanceLabels, auxdethitCols)) {
+           ranges::views::zip(fAuxDetHitsInstanceLabels, auxdethitCols)) {
         art::InputTag const auxdethit_tag{input_label.label(), auxdethit_inst};
         MergeUtility.MergeAuxDetHits(
           auxdethitCol, e.getProduct<aux_det_hits_t>(auxdethit_tag), i_source);
@@ -389,14 +410,14 @@ void sim::MergeSimSources::produce(art::Event& e)
   }
 
   if (fFillSimEnergyDeposits) {
-    for (auto&& [edep_inst, edepCol] : util::zip(fEnergyDepositionInstances, edepCols)) {
+    for (auto&& [edep_inst, edepCol] : ranges::views::zip(fEnergyDepositionInstances, edepCols)) {
       e.put(std::make_unique<edeps_t>(move(edepCol)), edep_inst);
     } // for
   }   // if fill energy deposits
 
   if (fFillAuxDetHits) {
     for (auto&& [auxdethit_inst, auxdethitCol] :
-         util::zip(fAuxDetHitsInstanceLabels, auxdethitCols)) {
+         ranges::views::zip(fAuxDetHitsInstanceLabels, auxdethitCols)) {
       e.put(std::make_unique<aux_det_hits_t>(move(auxdethitCol)), auxdethit_inst);
     }
   }

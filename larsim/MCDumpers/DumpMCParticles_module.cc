@@ -56,6 +56,19 @@ namespace {
       "DumpMCParticles" /* default value */
     };
 
+    fhicl::Atom<bool> PrintStepPositions{
+      Name("PrintStepPositions"),
+      Comment("prints the position and time of each trajectory point"),
+      true};
+
+    fhicl::Atom<bool> PrintStepMomenta{Name("PrintStepMomenta"),
+                                       Comment("prints the momentum at each trajectory point"),
+                                       false};
+
+    fhicl::Atom<bool> PrintStepEnergies{Name("PrintStepEnergies"),
+                                        Comment("prints the total energy at each trajectory point"),
+                                        false};
+
     fhicl::Atom<unsigned int> PointsPerLine{
       Name("PointsPerLine"),
       Comment("trajectory points printed per line (default: 2; 0 = skip them)"),
@@ -118,6 +131,9 @@ private:
   art::InputTag fInputParticles;    ///< name of MCParticle's data product
   art::InputTag fParticleTruthInfo; ///< name of MCParticle assns data product
   std::string fOutputCategory;      ///< name of the stream for output
+  bool fPrintStepPositions;         ///< whether to print trajectory coordinates
+  bool fPrintStepMomenta;           ///< whether to print momentum along trajectory
+  bool fPrintStepEnergies;          ///< whether to print energy along trajectory
   unsigned int fPointsPerLine;      ///< trajectory points per output line
 
   unsigned int fNEvents = 0U; ///< Count of processed events.
@@ -194,6 +210,9 @@ sim::DumpMCParticles::DumpMCParticles(Parameters const& config)
   : EDAnalyzer(config)
   , fInputParticles(config().InputParticles())
   , fOutputCategory(config().OutputCategory())
+  , fPrintStepPositions(config().PrintStepPositions())
+  , fPrintStepMomenta(config().PrintStepMomenta())
+  , fPrintStepEnergies(config().PrintStepEnergies())
   , fPointsPerLine(config().PointsPerLine())
 {
   if (!config().ParticleTruthInfo(fParticleTruthInfo)) fParticleTruthInfo = fInputParticles;
@@ -207,7 +226,7 @@ void sim::DumpMCParticles::DumpMCParticle(Stream&& out,
                                           sim::GeneratedParticleInfo const& truthInfo,
                                           std::string indent /* = "" */,
                                           bool bIndentFirst /* = true */
-                                          ) const
+) const
 {
 
   if (!truthTag.label().empty() || truthInfo.hasGeneratedParticleIndex()) {
@@ -227,8 +246,13 @@ void sim::DumpMCParticles::DumpMCParticle(Stream&& out,
   const unsigned int nPoints = particle.NumberTrajectoryPoints();
   if ((nPoints > 0) && (fPointsPerLine > 0)) {
     out << ":";
-    sim::dump::DumpMCParticleTrajectory(
-      std::forward<Stream>(out), particle.Trajectory(), fPointsPerLine, indent + "  ");
+    sim::dump::DumpMCParticleTrajectory(std::forward<Stream>(out),
+                                        particle.Trajectory(),
+                                        fPointsPerLine,
+                                        indent + "  ",
+                                        fPrintStepPositions,
+                                        fPrintStepMomenta,
+                                        fPrintStepEnergies);
   } // if has points
 
 } // sim::DumpMCParticles::DumpMCParticle()
@@ -269,10 +293,10 @@ void sim::DumpMCParticles::analyze(art::Event const& event)
     mf::LogVerbatim log(fOutputCategory);
 
     // fetch the input tag of the truth information (if any)
-    art::Ptr<simb::MCTruth> const& truth =
-      particleToTruth ?
-        particleToTruth->at(iParticle) :
-        particleToTruthLight ? particleToTruthLight->at(iParticle) : art::Ptr<simb::MCTruth>{};
+    art::Ptr<simb::MCTruth> const& truth = particleToTruth ? particleToTruth->at(iParticle) :
+                                           particleToTruthLight ?
+                                                             particleToTruthLight->at(iParticle) :
+                                                             art::Ptr<simb::MCTruth>{};
     art::InputTag const& truthTag = truth ? namesRegistry[truth] : art::InputTag{};
 
     // fetch the index of the true particle in the truth record (if any)
